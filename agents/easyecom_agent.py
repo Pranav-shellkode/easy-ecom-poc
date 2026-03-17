@@ -69,7 +69,6 @@ class EasyEcomAgent:
         planning_model = BedrockModel(
             model_id=BEDROCK_MODEL_ID,
             boto_session=self._boto_session,
-            # No additional_request_fields → extended thinking disabled (fast)
         )
         planning_agent = Agent(
             name="EasyEcom Planner",
@@ -90,7 +89,7 @@ class EasyEcomAgent:
                 "If no tool is needed (conversational query), respond:\n"
                 '{"tool": null, "params": {}, "summary": "<response>"}'
             ),
-            tools=[],  # No tools — guarantees zero side effects
+            tools=[],  
         )
         try:
             response = planning_agent(message)

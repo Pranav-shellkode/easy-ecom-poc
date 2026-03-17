@@ -26,7 +26,6 @@ if "messages" not in st.session_state:
 if "session_id" not in st.session_state:
     st.session_state.session_id = str(uuid.uuid4())
 
-# approval_state drives the UI state machine:
 #   "idle"      → show chat input, accept new messages
 #   "awaiting"  → planning done, show approval card, block input
 #   "executing" → user approved, run real agent, then return to idle
@@ -38,7 +37,6 @@ if "approval_state" not in st.session_state:
 if "pending_approval" not in st.session_state:
     st.session_state.pending_approval = None
 
-# ── Backend helpers ────────────────────────────────────────────────────────────
 
 def backend_chat(message: str, session_id: str) -> str:
     """Call POST /chat and return the response text."""
@@ -74,7 +72,6 @@ def backend_chat_stream(message: str, session_id: str):
             for line in resp.iter_lines():
                 if not line:
                     continue
-                # SSE lines look like: b"data: {...}"
                 text = line.decode("utf-8") if isinstance(line, bytes) else line
                 if text.startswith("data:"):
                     payload = text[len("data:"):].strip()
@@ -123,12 +120,11 @@ def extract_tool_plan(response_text: str) -> dict | None:
 
 
 TOOL_LABELS = {
-    "order_confirmation": "🛒 Order Confirmation",
-    "report_generation": "📊 Report Generation",
-    "batch_creation": "📦 Batch Creation",
+    "order_confirmation": " Order Confirmation",
+    "report_generation": " Report Generation",
+    "batch_creation": " Batch Creation",
 }
 
-# Planning prompt sent to the backend for intent detection (no side effects)
 _PLANNING_SYSTEM_INJECTION = (
     "You are a planning assistant for EasyEcom operations. "
     "Given a user request, output ONLY a single valid JSON object describing "
@@ -164,7 +160,7 @@ def render_approval_card(pending: dict):
     tool_input = pending.get("tool_input", {})
     summary = pending.get("summary", "")
 
-    label = TOOL_LABELS.get(tool_name, f"🛠️ {tool_name}")
+    label = TOOL_LABELS.get(tool_name, f"️ {tool_name}")
 
     st.markdown("---")
     st.warning(f"###️ Approval Required Before Execution")
@@ -225,7 +221,6 @@ def render_assistant_message(message: dict):
                 kind = item.get("kind")
                 if kind == "tool_call":
                     st.write(f"🛠️ **Tool Call:** `{item['name']}`")
-                    st.code(json.dumps(item["input"], indent=2), language="json")
                 elif kind == "tool_response":
                     st.write("📊 **Tool Response:**")
                     st.code(item["text"])
@@ -246,7 +241,6 @@ for message in st.session_state.messages:
             st.markdown(message["content"])
 
 
-# ── State machine ──────────────────────────────────────────────────────────────
 approval_state = st.session_state.approval_state
 
 
@@ -256,12 +250,11 @@ if approval_state == "awaiting":
     if pending:
         render_approval_card(pending)
     else:
-        # Shouldn't happen — recover gracefully
         st.session_state.approval_state = "idle"
         st.rerun()
 
 
-# ─────────────────────── EXECUTING (user approved) ────────────────────────────
+# state after the user presses the approve and execute button
 elif approval_state == "executing":
     pending = st.session_state.pending_approval or {}
     original_message = pending.get("original_message", "")
@@ -274,7 +267,7 @@ elif approval_state == "executing":
             try:
                 status.update(label="Reasoning...", state="running")
 
-                # ── Stream from the FastAPI /chat/stream endpoint ──────────────
+                # stream from the /chat/stream endpoint 
                 seen_tools: set = set()
 
                 for event in backend_chat_stream(original_message, st.session_state.session_id):
@@ -335,13 +328,12 @@ elif approval_state == "idle":
     if prompt := st.chat_input(
         "Ask me to confirm orders, generate reports, or create batches..."
     ):
-        # 1. Show user message immediately
         st.session_state.messages.append({"role": "user", "content": prompt})
         with st.chat_message("user"):
             st.markdown(prompt)
 
         # 2. Planning pass — POST /chat with a planning prompt (no side effects)
-        with st.spinner("🤔 Analyzing your request..."):
+        with st.spinner("Analyzing your request..."):
             try:
                 plan_text = plan_tool_call_via_api(prompt)
                 tool_plan = extract_tool_plan(plan_text)
@@ -349,7 +341,6 @@ elif approval_state == "idle":
                 tool_plan = None
 
         if tool_plan and tool_plan.get("tool"):
-            # 3a. Tool action identified → ask for approval
             st.session_state.pending_approval = {
                 "tool_name": tool_plan["tool"],
                 "tool_input": tool_plan.get("params", {}),
@@ -358,7 +349,6 @@ elif approval_state == "idle":
             }
             st.session_state.approval_state = "awaiting"
         else:
-            # 3b. No tool needed (conversational) → execute directly
             st.session_state.pending_approval = {
                 "tool_name": None,
                 "tool_input": {},
@@ -370,7 +360,6 @@ elif approval_state == "idle":
         st.rerun()
 
 
-# ── Sidebar ────────────────────────────────────────────────────────────────────
 with st.sidebar:
     st.header("💡 Example Commands")
 
@@ -389,7 +378,6 @@ with st.sidebar:
 
     st.markdown("---")
 
-    # ── Backend health check ───────────────────────────────────────────────────
     try:
         health = requests.get(f"{BACKEND_URL}/health", timeout=3)
         if health.ok:

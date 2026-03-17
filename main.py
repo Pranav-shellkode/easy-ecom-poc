@@ -1,8 +1,6 @@
 from dotenv import load_dotenv
 from pathlib import Path
 
-# Load .env from the project root (same dir as this file), override=True ensures
-# fresh values are always picked up even if env vars were set previously.
 _env_path = Path(__file__).parent / ".env"
 load_dotenv(dotenv_path=_env_path, override=True)
 
