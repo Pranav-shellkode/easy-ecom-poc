@@ -1,5 +1,15 @@
+from dotenv import load_dotenv
+from pathlib import Path
+
+# Load .env from the project root (same dir as this file), override=True ensures
+# fresh values are always picked up even if env vars were set previously.
+_env_path = Path(__file__).parent / ".env"
+load_dotenv(dotenv_path=_env_path, override=True)
+
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import StreamingResponse
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi import FastAPI , HTTPException 
 from pydantic import BaseModel
 from typing import Any
 from agents.easyecom_agent import EasyEcomAgent
@@ -8,6 +18,15 @@ import json
 import uuid
 
 app = FastAPI(title="EasyEcom AI Assistant API")
+
+
+app.add_middleware(
+    CORSMiddleware, 
+    allow_origins = ["*"],
+    allow_credentials = True,
+    allow_methods = ["*"] ,
+    allow_headers = ["*"], 
+)
 
 class ChatRequest(BaseModel):
     message: str
@@ -58,3 +77,4 @@ async def health_check():
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=MAIN_API_PORT)
+

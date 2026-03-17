@@ -1,27 +1,16 @@
+import sys, os
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))  # ensure project root is on path
+
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 from typing import List, Optional
 from config import MOCK_API_PORT
 from itertools import count
+from mock_apis.models import OrderConfirmRequest, ReportRequest, BatchRequest
 
 mock_app = FastAPI(title="EasyEcom Mock API")
 _report_counter = count(1)
 
-class OrderConfirmRequest(BaseModel):
-    count: int
-    marketplace_name: List[str]
-    order_type: Optional[str] = None
-    payment_mode: Optional[str] = None
-
-class ReportRequest(BaseModel):
-    report_type: str
-    report_params: dict
-    mailed: bool = False
-
-class BatchRequest(BaseModel):
-    count: int
-    batch_size: int
-    marketplaces: List[str]
 
 @mock_app.post("/orders/confirm")
 async def confirm_orders(request: OrderConfirmRequest):

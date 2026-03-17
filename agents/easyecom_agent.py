@@ -1,3 +1,4 @@
+import os
 import logging
 from collections import OrderedDict
 from strands import Agent
@@ -10,16 +11,24 @@ from typing import Dict, Any, Optional, AsyncGenerator
 
 logger = logging.getLogger(__name__)
 
+
 MAX_SESSIONS = 10
 
 class EasyEcomAgent:
     """EasyEcom AI Assistant using Strands SDK"""
     
     def __init__(self):
+        import boto3
+        self._boto_session = boto3.Session(
+            aws_access_key_id=os.getenv("AWS_ACCESS_KEY_ID"),
+            aws_secret_access_key=os.getenv("AWS_SECRET_ACCESS_KEY"),
+            region_name=os.getenv("AWS_DEFAULT_REGION", "us-east-1"),
+        )
+
         self._agents: OrderedDict[str, Agent] = OrderedDict()
         self._bedrock_model = BedrockModel(
             model_id=BEDROCK_MODEL_ID,
-            region_name=AWS_REGION,
+            boto_session=self._boto_session,
             additional_request_fields={"thinking": {"type": "enabled", "budget_tokens": BEDROCK_THINKING_BUDGET}}
         )
     
@@ -47,7 +56,49 @@ class EasyEcomAgent:
         except Exception as e:
             logger.error("session_id=<%s>, error=<%s> | failed to initialize strands agent", session_id, str(e))
             return None
-    
+
+    def plan_tool_call(self, message: str) -> str:
+        """Run a lightweight planning pass (no tools, no thinking) to extract
+        the intended tool call as a JSON plan before asking the user to approve.
+
+        Returns a string that should contain a JSON object like:
+            {"tool": "<name>", "params": {...}, "summary": "<human description>"}
+        or:
+            {"tool": null, "params": {}, "summary": "<conversational response>"}
+        """
+        planning_model = BedrockModel(
+            model_id=BEDROCK_MODEL_ID,
+            boto_session=self._boto_session,
+            # No additional_request_fields → extended thinking disabled (fast)
+        )
+        planning_agent = Agent(
+            name="EasyEcom Planner",
+            model=planning_model,
+            system_prompt=(
+                "You are a planning assistant for EasyEcom operations. "
+                "Given a user request, output ONLY a single valid JSON object describing "
+                "the tool action that would be taken — do NOT execute anything.\n\n"
+                "Available tools and their parameters:\n"
+                "- order_confirmation: count (int), marketplace_name (list[str]), "
+                "order_type (optional str), payment_mode (optional str)\n"
+                "- report_generation: report_type (str), "
+                "report_params (optional dict with startDate/endDate), mailed (bool)\n"
+                "- batch_creation: count (int), batch_size (int), marketplaces (list[str])\n\n"
+                "Response format (JSON only, no other text):\n"
+                '{"tool": "<tool_name>", "params": {<key>: <value>}, '
+                '"summary": "<plain English description of the action>"}\n\n'
+                "If no tool is needed (conversational query), respond:\n"
+                '{"tool": null, "params": {}, "summary": "<response>"}'
+            ),
+            tools=[],  # No tools — guarantees zero side effects
+        )
+        try:
+            response = planning_agent(message)
+            return str(response)
+        except Exception as e:
+            logger.error("error=<%s> | planning pass failed", str(e))
+            return '{"tool": null, "params": {}, "summary": ""}'
+
     async def process_message_streaming(self, message: str, session_id: str) -> AsyncGenerator[Dict[str, Any], None]:
         """Process user message with streaming response for API"""
         try:

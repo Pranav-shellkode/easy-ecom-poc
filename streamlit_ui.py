@@ -1,12 +1,17 @@
+from dotenv import load_dotenv
+from pathlib import Path
+load_dotenv(dotenv_path=Path(__file__).parent / ".env", override=True)
+
 import streamlit as st
-import asyncio
+import requests
 import json
+import re
 import uuid
 
-from agents.easyecom_agent import EasyEcomAgent
 from config import MAIN_API_PORT, MOCK_API_PORT
 
-# Configure page
+BACKEND_URL = f"http://localhost:{MAIN_API_PORT}"
+
 st.set_page_config(
     page_title="EasyEcom AI Assistant",
     page_icon="🤖",
@@ -16,31 +21,204 @@ st.set_page_config(
 st.title("🤖 EasyEcom AI Assistant")
 st.markdown("Your intelligent assistant with real-time execution visibility")
 
-# Initialize session state
 if "messages" not in st.session_state:
     st.session_state.messages = []
 if "session_id" not in st.session_state:
     st.session_state.session_id = str(uuid.uuid4())
 
-# Initialize agent
-@st.cache_resource
-def get_agent():
-    return EasyEcomAgent()
+# approval_state drives the UI state machine:
+#   "idle"      → show chat input, accept new messages
+#   "awaiting"  → planning done, show approval card, block input
+#   "executing" → user approved, run real agent, then return to idle
+if "approval_state" not in st.session_state:
+    st.session_state.approval_state = "idle"
 
-agent = get_agent()
+# pending_approval holds:
+#   {tool_name, tool_input, original_message, summary}
+if "pending_approval" not in st.session_state:
+    st.session_state.pending_approval = None
+
+# ── Backend helpers ────────────────────────────────────────────────────────────
+
+def backend_chat(message: str, session_id: str) -> str:
+    """Call POST /chat and return the response text."""
+    try:
+        resp = requests.post(
+            f"{BACKEND_URL}/chat",
+            json={"message": message, "session_id": session_id},
+            timeout=120,
+        )
+        resp.raise_for_status()
+        return resp.json().get("response", "")
+    except Exception as e:
+        return f"Error contacting backend: {e}"
+
+
+def backend_chat_stream(message: str, session_id: str):
+    """
+    Call POST /chat/stream and yield parsed event dicts.
+    Each yielded dict has one of these shapes:
+      {"token": "<text>"}
+      {"tool_use": {<tool data>}}
+      {"result": "<text>"}
+      {"error": "<text>"}
+    """
+    try:
+        with requests.post(
+            f"{BACKEND_URL}/chat/stream",
+            json={"message": message, "session_id": session_id},
+            stream=True,
+            timeout=300,
+        ) as resp:
+            resp.raise_for_status()
+            for line in resp.iter_lines():
+                if not line:
+                    continue
+                # SSE lines look like: b"data: {...}"
+                text = line.decode("utf-8") if isinstance(line, bytes) else line
+                if text.startswith("data:"):
+                    payload = text[len("data:"):].strip()
+                    try:
+                        yield json.loads(payload)
+                    except json.JSONDecodeError:
+                        pass
+    except Exception as e:
+        yield {"error": str(e)}
+
+
+
+def extract_tool_plan(response_text: str) -> dict | None:
+    """Parse tool plan JSON from an LLM planning response."""
+    # 1. JSON inside a code fence
+    fence = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", response_text, re.DOTALL)
+    if fence:
+        try:
+            data = json.loads(fence.group(1))
+            if "tool" in data:
+                return data
+        except json.JSONDecodeError:
+            pass
+
+    # 2. First {...} block containing the word "tool"
+    brace = re.search(r"\{[^{}]*\"tool\"[^{}]*\}", response_text, re.DOTALL)
+    if brace:
+        try:
+            data = json.loads(brace.group(0))
+            if "tool" in data:
+                return data
+        except json.JSONDecodeError:
+            pass
+
+    # 3. Whole response as JSON
+    stripped = response_text.strip()
+    if stripped.startswith("{"):
+        try:
+            data = json.loads(stripped)
+            if "tool" in data:
+                return data
+        except json.JSONDecodeError:
+            pass
+
+    return None
+
+
+TOOL_LABELS = {
+    "order_confirmation": "🛒 Order Confirmation",
+    "report_generation": "📊 Report Generation",
+    "batch_creation": "📦 Batch Creation",
+}
+
+# Planning prompt sent to the backend for intent detection (no side effects)
+_PLANNING_SYSTEM_INJECTION = (
+    "You are a planning assistant for EasyEcom operations. "
+    "Given a user request, output ONLY a single valid JSON object describing "
+    "the tool action that would be taken — do NOT execute anything.\n\n"
+    "Available tools and their parameters:\n"
+    "- order_confirmation: count (int), marketplace_name (list[str]), "
+    "order_type (optional str), payment_mode (optional str)\n"
+    "- report_generation: report_type (str), "
+    "report_params (optional dict with startDate/endDate), mailed (bool)\n"
+    "- batch_creation: count (int), batch_size (int), marketplaces (list[str])\n\n"
+    "Response format (JSON only, no other text):\n"
+    '{"tool": "<tool_name>", "params": {<key>: <value>}, '
+    '"summary": "<plain English description of the action>"}\n\n'
+    "If no tool is needed (conversational query), respond:\n"
+    '{"tool": null, "params": {}, "summary": "<response>"}\n\n'
+    "USER REQUEST: "
+)
+
+
+def plan_tool_call_via_api(message: str) -> str:
+    """
+    Ask the backend to plan (not execute) the given message.
+    We embed the planning instructions inside the message itself so the
+    existing /chat endpoint acts as our planning pass.
+    """
+    planning_message = _PLANNING_SYSTEM_INJECTION + message
+    return backend_chat(planning_message, session_id="__planner__")
+
+
+def render_approval_card(pending: dict):
+    """Render the HITL approval card with Approve / Cancel buttons."""
+    tool_name = pending.get("tool_name", "Unknown Tool")
+    tool_input = pending.get("tool_input", {})
+    summary = pending.get("summary", "")
+
+    label = TOOL_LABELS.get(tool_name, f"🛠️ {tool_name}")
+
+    st.markdown("---")
+    st.warning(f"###️ Approval Required Before Execution")
+    st.markdown(f"**Action:** {label}")
+
+    if summary:
+        st.info(f"**What will happen:** {summary}")
+
+    # Parameters table
+    st.markdown("**Parameters to be used:**")
+    rows = [
+        {"Parameter": k, "Value": str(v)}
+        for k, v in tool_input.items()
+        if v is not None
+    ]
+    if rows:
+        st.table(rows)
+    else:
+        st.caption("No parameters.")
+
+    col1, col2, _ = st.columns([1, 1, 2])
+    with col1:
+        if st.button(
+            "Approve & Execute",
+            key="approve_btn",
+            type="primary",
+            use_container_width=True,
+        ):
+            st.session_state.approval_state = "executing"
+            st.rerun()
+    with col2:
+        if st.button("Cancel", key="cancel_btn", use_container_width=True):
+            st.session_state.pending_approval = None
+            st.session_state.approval_state = "idle"
+            st.session_state.messages.append(
+                {
+                    "role": "assistant",
+                    "content": " Action cancelled. No changes were made.",
+                    "rich_content": [],
+                }
+            )
+            st.rerun()
 
 
 def render_assistant_message(message: dict):
     """
     Render an assistant message including its rich content (tool calls,
-    tool responses, reasoning) so it looks the same whether it's being
+    tool responses, reasoning) so it looks the same whether being
     rendered for the first time or re-rendered from history.
     """
     rich = message.get("rich_content", [])
     text = message.get("content", "")
 
     if rich:
-        # Determine the final status label to show on the closed expander
         final_label = "Response Generated" if text else "Completed"
         with st.status(final_label, expanded=False, state="complete"):
             for item in rich:
@@ -59,7 +237,7 @@ def render_assistant_message(message: dict):
         st.markdown(text)
 
 
-# ── Replay history ──────────────────────────────────────────────────────────
+# ── Replay chat history ────────────────────────────────────────────────────────
 for message in st.session_state.messages:
     with st.chat_message(message["role"]):
         if message["role"] == "assistant":
@@ -67,97 +245,73 @@ for message in st.session_state.messages:
         else:
             st.markdown(message["content"])
 
-# ── New user input ───────────────────────────────────────────────────────────
-if prompt := st.chat_input("Ask me to confirm orders, generate reports, or create batches..."):
-    st.session_state.messages.append({"role": "user", "content": prompt})
-    with st.chat_message("user"):
-        st.markdown(prompt)
+
+# ── State machine ──────────────────────────────────────────────────────────────
+approval_state = st.session_state.approval_state
+
+
+# ─────────────────────── AWAITING APPROVAL ────────────────────────────────────
+if approval_state == "awaiting":
+    pending = st.session_state.pending_approval
+    if pending:
+        render_approval_card(pending)
+    else:
+        # Shouldn't happen — recover gracefully
+        st.session_state.approval_state = "idle"
+        st.rerun()
+
+
+# ─────────────────────── EXECUTING (user approved) ────────────────────────────
+elif approval_state == "executing":
+    pending = st.session_state.pending_approval or {}
+    original_message = pending.get("original_message", "")
+
+    full_response = ""
+    rich_content = []
 
     with st.chat_message("assistant"):
         with st.status("Initializing...", expanded=True) as status:
             try:
-                strands_agent = agent.get_strands_agent(st.session_state.session_id)
-                if not strands_agent:
-                    st.error("AI assistant is currently unavailable. Please try again later.")
-                    status.update(label="Unavailable", state="error")
-                else:
-                    invocation_state = {
-                        "session_id": st.session_state.session_id,
-                        "user_id": "default_user"
-                    }
+                status.update(label="Reasoning...", state="running")
 
-                    status.update(label="Reasoning...", state="running")
+                # ── Stream from the FastAPI /chat/stream endpoint ──────────────
+                seen_tools: set = set()
 
-                    async def collect_events():
-                        events = []
-                        async for event in strands_agent.stream_async(prompt, **invocation_state):
-                            events.append(event)
-                        return events
+                for event in backend_chat_stream(original_message, st.session_state.session_id):
+                    if "error" in event:
+                        status.update(label="Error occurred", state="error")
+                        st.error(f"Error: {event['error']}")
+                        full_response = f"I encountered an error: {event['error']}"
+                        break
 
-                    events = asyncio.run(collect_events())
+                    elif "token" in event:
+                        if not full_response:
+                            status.update(label="Generating response...", state="running")
+                        full_response += event["token"]
 
-                    full_response = ""
-                    seen_tools = set()
-                    reasoning_text = ""
-                    # Ordered list of rich items to persist
-                    rich_content = []
+                    elif "tool_use" in event:
+                        tool_data = event["tool_use"]
+                        tool_name = tool_data.get("name", "")
+                        tool_input = tool_data.get("input", {})
+                        if tool_name and tool_name not in seen_tools and tool_input:
+                            seen_tools.add(tool_name)
+                            status.update(label=f"Calling {tool_name}...", state="running")
+                            st.write(f"🛠️ **Tool Call:** `{tool_name}`")
+                            st.code(json.dumps(tool_input, indent=2), language="json")
+                            rich_content.append(
+                                {"kind": "tool_call", "name": tool_name, "input": tool_input}
+                            )
 
-                    for event in events:
-                        # Capture reasoning from raw event stream
-                        if "event" in event:
-                            raw = event["event"]
-                            if "contentBlockDelta" in raw:
-                                delta = raw["contentBlockDelta"].get("delta", {})
-                                if "reasoningContent" in delta:
-                                    reasoning_text += delta["reasoningContent"].get("text", "")
+                    elif "result" in event:
+                        result_text = event["result"]
+                        if result_text:
+                            status.update(label="Analyzing tool response...", state="running")
+                            st.write("📊 **Tool Response:**")
+                            st.code(result_text)
+                            rich_content.append({"kind": "tool_response", "text": result_text})
 
-                        # Tool call events
-                        elif "current_tool_use" in event:
-                            tool_data = event["current_tool_use"]
-                            tool_name = tool_data.get("name", "")
-                            tool_input = tool_data.get("input", {})
-                            if tool_name and tool_name not in seen_tools and tool_input:
-                                seen_tools.add(tool_name)
-                                status.update(label=f"Calling {tool_name}...", state="running")
-                                st.write(f"🛠️ **Tool Call:** `{tool_name}`")
-                                st.code(json.dumps(tool_input, indent=2), language="json")
-                                rich_content.append({
-                                    "kind": "tool_call",
-                                    "name": tool_name,
-                                    "input": tool_input,
-                                })
-
-                        # Tool result in message events
-                        elif "message" in event:
-                            msg = event["message"]
-                            if isinstance(msg, dict):
-                                for block in msg.get("content", []):
-                                    if isinstance(block, dict) and "toolResult" in block:
-                                        result_content = block["toolResult"].get("content", [])
-                                        for rc in result_content:
-                                            if isinstance(rc, dict) and "text" in rc:
-                                                status.update(label="Analyzing tool response...", state="running")
-                                                st.write("📊 **Tool Response:**")
-                                                st.code(rc["text"])
-                                                rich_content.append({
-                                                    "kind": "tool_response",
-                                                    "text": rc["text"],
-                                                })
-
-                        # Text response tokens
-                        elif "data" in event:
-                            if not full_response:
-                                status.update(label="Generating response...", state="running")
-                            full_response += event["data"]
-
-                    # Attach reasoning to rich content (prepend so it shows first)
-                    if reasoning_text:
-                        rich_content.insert(0, {"kind": "reasoning", "text": reasoning_text})
-                        st.write("💭 **Reasoning:**")
-                        st.caption(reasoning_text)
-
-                    if full_response:
-                        status.update(label="Response Generated", state="complete")
+                if full_response:
+                    status.update(label="Response Generated", state="complete")
 
             except Exception as e:
                 status.update(label="Error occurred", state="error")
@@ -165,20 +319,58 @@ if prompt := st.chat_input("Ask me to confirm orders, generate reports, or creat
                 full_response = f"I encountered an error: {str(e)}"
                 rich_content = []
 
-        # Display final response outside the status block
         if full_response:
             st.markdown(full_response)
 
-        # ── Persist the full rich message to session state ──────────────────
-        assistant_message = {
-            "role": "assistant",
-            "content": full_response,
-            "rich_content": rich_content,   # <-- this is what was missing
-        }
-        st.session_state.messages.append(assistant_message)
+    # Persist message and reset state
+    st.session_state.messages.append(
+        {"role": "assistant", "content": full_response, "rich_content": rich_content}
+    )
+    st.session_state.approval_state = "idle"
+    st.session_state.pending_approval = None
+    st.rerun()
 
 
-# ── Sidebar ──────────────────────────────────────────────────────────────────
+elif approval_state == "idle":
+    if prompt := st.chat_input(
+        "Ask me to confirm orders, generate reports, or create batches..."
+    ):
+        # 1. Show user message immediately
+        st.session_state.messages.append({"role": "user", "content": prompt})
+        with st.chat_message("user"):
+            st.markdown(prompt)
+
+        # 2. Planning pass — POST /chat with a planning prompt (no side effects)
+        with st.spinner("🤔 Analyzing your request..."):
+            try:
+                plan_text = plan_tool_call_via_api(prompt)
+                tool_plan = extract_tool_plan(plan_text)
+            except Exception:
+                tool_plan = None
+
+        if tool_plan and tool_plan.get("tool"):
+            # 3a. Tool action identified → ask for approval
+            st.session_state.pending_approval = {
+                "tool_name": tool_plan["tool"],
+                "tool_input": tool_plan.get("params", {}),
+                "original_message": prompt,
+                "summary": tool_plan.get("summary", ""),
+            }
+            st.session_state.approval_state = "awaiting"
+        else:
+            # 3b. No tool needed (conversational) → execute directly
+            st.session_state.pending_approval = {
+                "tool_name": None,
+                "tool_input": {},
+                "original_message": prompt,
+                "summary": "",
+            }
+            st.session_state.approval_state = "executing"
+
+        st.rerun()
+
+
+# ── Sidebar ────────────────────────────────────────────────────────────────────
 with st.sidebar:
     st.header("💡 Example Commands")
 
@@ -196,11 +388,20 @@ with st.sidebar:
     st.code("Create 5 batches of 50 orders from Flipkart")
 
     st.markdown("---")
-    st.markdown("**Status:** 🟢 Real-time Event Logging")
+
+    # ── Backend health check ───────────────────────────────────────────────────
+    try:
+        health = requests.get(f"{BACKEND_URL}/health", timeout=3)
+        if health.ok:
+            st.markdown("**Backend:** 🟢 Connected")
+        else:
+            st.markdown("**Backend:** � Unhealthy")
+    except Exception:
+        st.markdown("**Backend:** 🔴 Offline — start `main.py`")
+
     st.markdown(f"**Main API:** Port {MAIN_API_PORT}")
     st.markdown(f"**Mock API:** Port {MOCK_API_PORT}")
 
-    if st.button("🗑️ Clear Chat"):
-        get_agent.clear()
+    if st.button("Clear Chat"):
         st.session_state.clear()
         st.rerun()
