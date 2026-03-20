@@ -1,11 +1,13 @@
 import os
+from dotenv import load_dotenv
+load_dotenv()
 import logging
 from collections import OrderedDict
 from strands import Agent
 from strands.models import BedrockModel
 from strands.session.file_session_manager import FileSessionManager
 from tools.easyecom_tools import order_confirmation_tool, report_generation_tool, batch_creation_tool
-from agents.agent_prompts import get_easyecom_system_prompt
+from agents.agent_prompts import get_easyecom_system_prompt, get_current_date_iso
 from config import AWS_REGION, BEDROCK_MODEL_ID, BEDROCK_THINKING_BUDGET
 from typing import Dict, Any, Optional, AsyncGenerator
 
@@ -75,13 +77,17 @@ class EasyEcomAgent:
             model=planning_model,
             system_prompt=(
                 "You are a planning assistant for EasyEcom operations. "
+                f"Today's date (IST) is {get_current_date_iso()}. "
+                "Use this date when resolving relative date references like 'last month', "
+                "'last week', 'last 7 days', 'January', etc. into concrete startDate/endDate values.\n\n"
                 "Given a user request, output ONLY a single valid JSON object describing "
                 "the tool action that would be taken — do NOT execute anything.\n\n"
                 "Available tools and their parameters:\n"
                 "- order_confirmation: count (int), marketplace_name (list[str]), "
                 "order_type (optional str), payment_mode (optional str)\n"
-                "- report_generation: report_type (str), "
-                "report_params (optional dict with startDate/endDate), mailed (bool)\n"
+                "- report_generation: report_type (str), user_message (str — always include "
+                "the original user message), "
+                "report_params (optional dict with startDate/endDate as YYYY-MM-DD strings), mailed (bool)\n"
                 "- batch_creation: count (int), batch_size (int), marketplaces (list[str])\n\n"
                 "Response format (JSON only, no other text):\n"
                 '{"tool": "<tool_name>", "params": {<key>: <value>}, '
@@ -89,7 +95,7 @@ class EasyEcomAgent:
                 "If no tool is needed (conversational query), respond:\n"
                 '{"tool": null, "params": {}, "summary": "<response>"}'
             ),
-            tools=[],  
+            tools=[],
         )
         try:
             response = planning_agent(message)

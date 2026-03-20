@@ -9,6 +9,7 @@ import re
 import uuid
 
 from config import MAIN_API_PORT, MOCK_API_PORT
+from agents.agent_prompts import get_current_date_iso
 
 BACKEND_URL = f"http://localhost:{MAIN_API_PORT}"
 
@@ -125,23 +126,29 @@ TOOL_LABELS = {
     "batch_creation": " Batch Creation",
 }
 
-_PLANNING_SYSTEM_INJECTION = (
-    "You are a planning assistant for EasyEcom operations. "
-    "Given a user request, output ONLY a single valid JSON object describing "
-    "the tool action that would be taken — do NOT execute anything.\n\n"
-    "Available tools and their parameters:\n"
-    "- order_confirmation: count (int), marketplace_name (list[str]), "
-    "order_type (optional str), payment_mode (optional str)\n"
-    "- report_generation: report_type (str), "
-    "report_params (optional dict with startDate/endDate), mailed (bool)\n"
-    "- batch_creation: count (int), batch_size (int), marketplaces (list[str])\n\n"
-    "Response format (JSON only, no other text):\n"
-    '{"tool": "<tool_name>", "params": {<key>: <value>}, '
-    '"summary": "<plain English description of the action>"}\n\n'
-    "If no tool is needed (conversational query), respond:\n"
-    '{"tool": null, "params": {}, "summary": "<response>"}\n\n'
-    "USER REQUEST: "
-)
+def _get_planning_injection() -> str:
+    """Build the planning prompt fresh on each call so today's date is always accurate."""
+    return (
+        "You are a planning assistant for EasyEcom operations. "
+        f"Today's date (IST) is {get_current_date_iso()}. "
+        "Use this date when resolving relative date references like 'last month', "
+        "'last week', 'last 7 days', 'January', etc. into concrete startDate/endDate values.\n\n"
+        "Given a user request, output ONLY a single valid JSON object describing "
+        "the tool action that would be taken \u2014 do NOT execute anything.\n\n"
+        "Available tools and their parameters:\n"
+        "- order_confirmation: count (int), marketplace_name (list[str]), "
+        "order_type (optional str), payment_mode (optional str)\n"
+        "- report_generation: report_type (str), user_message (str \u2014 always include "
+        "the original user message verbatim), "
+        "report_params (optional dict with startDate/endDate as YYYY-MM-DD strings), mailed (bool)\n"
+        "- batch_creation: count (int), batch_size (int), marketplaces (list[str])\n\n"
+        "Response format (JSON only, no other text):\n"
+        '{"tool": "<tool_name>", "params": {<key>: <value>}, '
+        '"summary": "<plain English description including any resolved date range>"}\n\n'
+        "If no tool is needed (conversational query), respond:\n"
+        '{"tool": null, "params": {}, "summary": "<response>"}\n\n'
+        "USER REQUEST: "
+    )
 
 
 def plan_tool_call_via_api(message: str) -> str:
@@ -150,7 +157,7 @@ def plan_tool_call_via_api(message: str) -> str:
     We embed the planning instructions inside the message itself so the
     existing /chat endpoint acts as our planning pass.
     """
-    planning_message = _PLANNING_SYSTEM_INJECTION + message
+    planning_message = _get_planning_injection() + message
     return backend_chat(planning_message, session_id="__planner__")
 
 

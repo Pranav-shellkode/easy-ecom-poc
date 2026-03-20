@@ -1,15 +1,16 @@
 from dotenv import load_dotenv
 from pathlib import Path
 
+# Load .env from the project root (same dir as this file), override=True ensures
+# fresh values are always picked up even if env vars were set previously.
 _env_path = Path(__file__).parent / ".env"
 load_dotenv(dotenv_path=_env_path, override=True)
 
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi import FastAPI , HTTPException 
 from pydantic import BaseModel
-from typing import Any
+from typing import Any 
 from agents.easyecom_agent import EasyEcomAgent
 from config import MAIN_API_PORT
 import json
@@ -57,10 +58,10 @@ async def chat_stream(request: ChatRequest):
         except Exception as e:
             yield f"data: {json.dumps({'error': str(e)})}\n\n"
     
-    return StreamingResponse(generate(), media_type="text/plain")
+    return StreamingResponse(generate(), media_type="text/event-stream")
 
 @app.post("/chat", response_model=ChatResponse)
-async def chat(request: ChatRequest):
+async def chat(request: ChatRequest) -> ChatResponse:
     """Standard chat endpoint"""
     try:
         result = await agent.process_message(request.message, request.session_id)
@@ -73,6 +74,6 @@ async def health_check():
     return {"status": "healthy"}
 
 if __name__ == "__main__":
-    import uvicorn
+    import uvicorn 
     uvicorn.run(app, host="0.0.0.0", port=MAIN_API_PORT)
 

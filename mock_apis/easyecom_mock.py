@@ -2,8 +2,6 @@ import sys, os
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))  # ensure project root is on path
 
 from fastapi import FastAPI, HTTPException
-from pydantic import BaseModel
-from typing import List, Optional
 from config import MOCK_API_PORT
 from itertools import count
 from mock_apis.models import OrderConfirmRequest, ReportRequest, BatchRequest
@@ -32,7 +30,8 @@ async def generate_report(request: ReportRequest):
         raise HTTPException(status_code=400, detail="Invalid report type")
     
     if request.report_type in ["MINI_SALES_REPORT", "TAX_REPORT"]:
-        if not request.report_params.get("startDate") or not request.report_params.get("endDate"):
+        params = request.report_params or {}
+        if not params.get("startDate") or not params.get("endDate"):
             raise HTTPException(status_code=400, detail="Date range is mandatory for this report")
     
     action = "emailed" if request.mailed else "generated"

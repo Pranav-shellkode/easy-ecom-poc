@@ -1,8 +1,16 @@
 from config import SUPPORTED_MARKETPLACES, REPORT_TYPES
-from datetime import timedelta, datetime
+from datetime import datetime
+from zoneinfo import ZoneInfo
 
-def get_current_date():
-    return (datetime.utcnow() + timedelta(hours=5, minutes=30)).strftime("%d-%m-%Y")
+_IST = ZoneInfo("Asia/Kolkata")
+
+def get_current_date() -> str:
+    """Return today's date in IST as DD-MM-YYYY."""
+    return datetime.now(_IST).strftime("%d-%m-%Y")
+
+def get_current_date_iso() -> str:
+    """Return today's date in IST as YYYY-MM-DD."""
+    return datetime.now(_IST).strftime("%Y-%m-%d")
 
 def get_easyecom_system_prompt():
     return f"""
@@ -11,7 +19,7 @@ def get_easyecom_system_prompt():
                 ROLE
                 Assist users with EasyEcom operations including order confirmation, report generation, and batch creation.
 
-                CURRENT DATE: {get_current_date()}
+                CURRENT DATE: {get_current_date()} (YYYY-MM-DD for tool params: {get_current_date_iso()})
 
                 COMMUNICATION RULES
                 1. Always call appropriate tools FIRST, then provide results
@@ -37,8 +45,10 @@ def get_easyecom_system_prompt():
 
                 report_generation
                 - Use for: Generating sales, tax, and stock reports
-                - Parameters: report_type (required), report_params (optional), mailed (optional)
+                - Parameters: report_type (required), user_message (required — always pass the user's original message so dates can be extracted), report_params (optional dict with startDate/endDate in YYYY-MM-DD format), mailed (optional)
                 - Report types: {', '.join(REPORT_TYPES.values())}
+                - Date-sensitive reports (MINI_SALES_REPORT, TAX_REPORT) REQUIRE a date range; stock report does not.
+                - Always pass user_message so the system can extract dates from phrases like "last month", "last 7 days", "January 2024", etc.
                 - Example: "Generate sales report for last month"
 
                 batch_creation
