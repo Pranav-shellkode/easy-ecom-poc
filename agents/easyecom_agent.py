@@ -59,6 +59,7 @@ class EasyEcomAgent:
             logger.error("session_id=<%s>, error=<%s> | failed to initialize strands agent", session_id, str(e))
             return None
 
+    # this part of the tool call is purely used by the streamlit implementation for confirmation before tool execution only
     def plan_tool_call(self, message: str) -> str:
         """Run a lightweight planning pass (no tools, no thinking) to extract
         the intended tool call as a JSON plan before asking the user to approve.
@@ -76,24 +77,65 @@ class EasyEcomAgent:
             name="EasyEcom Planner",
             model=planning_model,
             system_prompt=(
-                "You are a planning assistant for EasyEcom operations. "
+                "You are the planning layer of an EasyEcom AI Assistant. "
                 f"Today's date (IST) is {get_current_date_iso()}. "
-                "Use this date when resolving relative date references like 'last month', "
-                "'last week', 'last 7 days', 'January', etc. into concrete startDate/endDate values.\n\n"
-                "Given a user request, output ONLY a single valid JSON object describing "
-                "the tool action that would be taken — do NOT execute anything.\n\n"
-                "Available tools and their parameters:\n"
-                "- order_confirmation: count (int), marketplace_name (list[str]), "
-                "order_type (optional str), payment_mode (optional str)\n"
-                "- report_generation: report_type (str), user_message (str — always include "
-                "the original user message), "
-                "report_params (optional dict with startDate/endDate as YYYY-MM-DD strings), mailed (bool)\n"
-                "- batch_creation: count (int), batch_size (int), marketplaces (list[str])\n\n"
-                "Response format (JSON only, no other text):\n"
-                '{"tool": "<tool_name>", "params": {<key>: <value>}, '
-                '"summary": "<plain English description of the action>"}\n\n'
-                "If no tool is needed (conversational query), respond:\n"
-                '{"tool": null, "params": {}, "summary": "<response>"}'
+                "Your ONLY job is to analyse the user request and return a JSON plan. Do NOT execute anything.\n\n"
+
+                "DATE RESOLUTION\n"
+                f"Use today = {get_current_date_iso()} to resolve relative expressions into exact YYYY-MM-DD dates.\n"
+                "- 'last month' → full previous calendar month\n"
+                "- 'last week' → last Monday to last Sunday\n"
+                "- 'last N days' → today minus N days to today\n"
+                "- Named month (e.g. 'January') → full month of current year unless year is specified\n"
+                "- Q1/Q2/Q3/Q4 → corresponding calendar quarter\n"
+                "Sales and tax reports ALWAYS require both startDate and endDate. "
+                "Stock reports NEVER need a date range.\n\n"
+
+                "TOOLS & REQUIRED PARAMETERS\n"
+                "- order_confirmation:\n"
+                "    count (int > 0) REQUIRED\n"
+                "    marketplace_name (list — Amazon | Flipkart | Myntra) REQUIRED\n"
+                "    order_type (optional: 'forward' | 'reverse')\n"
+                "    payment_mode (optional: 'prepaid' | 'COD')\n"
+                "- report_generation:\n"
+                "    report_type (MINI_SALES_REPORT | TAX_REPORT | STATUS_WISE_STOCK_REPORT) REQUIRED\n"
+                "    user_message (copy user's original message verbatim) REQUIRED\n"
+                "    report_params ({startDate, endDate} YYYY-MM-DD) REQUIRED for sales/tax, omit for stock\n"
+                "    mailed (bool) — true ONLY if user explicitly asks to email/send the report\n"
+                "- batch_creation:\n"
+                "    count (int > 0) REQUIRED\n"
+                "    batch_size (int > 0) REQUIRED\n"
+                "    marketplaces (list — Amazon | Flipkart | Myntra) REQUIRED\n\n"
+
+                "STATUS RULES — choose exactly one:\n"
+                "  'ready'               → all required params present → show confirmation card\n"
+                "  'needs_clarification' → one or more required params missing → write a natural question\n"
+                "  'conversational'      → no tool needed → answer the user directly\n\n"
+
+                "OUTPUT FORMAT — respond with ONLY valid JSON, no other text:\n\n"
+
+                "When status is 'ready':\n"
+                '{"tool": "<name>", "params": {<all resolved params>}, "status": "ready", '
+                '"summary": "<one sentence: what will happen>", "question": null}\n\n'
+
+                "When status is 'needs_clarification':\n"
+                '{"tool": "<name>", "params": {<whatever resolved so far>}, "status": "needs_clarification", '
+                '"summary": "<brief description>", '
+                '"question": "<natural friendly clarifying question>"}\n\n'
+
+                "When status is 'conversational':\n"
+                '{"tool": null, "params": {}, "status": "conversational", '
+                '"summary": "<helpful reply>", "question": null}\n\n'
+
+                "EXAMPLES\n"
+                "- 'Confirm Amazon orders' → needs_clarification: question='How many orders would you like to confirm from Amazon?'\n"
+                "- 'Confirm 50 Amazon orders' → ready\n"
+                "- 'Generate a report' → needs_clarification: question='Which report — Sales, Tax, or Stock?'\n"
+                "- 'Generate sales report for last month' → ready with resolved dates\n"
+                "- 'Create batches for Amazon' → needs_clarification: question='How many batches, and how many orders per batch?'\n"
+                "- 'What can you do?' → conversational\n\n"
+
+                "USER REQUEST: "
             ),
             tools=[],
         )
@@ -103,6 +145,7 @@ class EasyEcomAgent:
         except Exception as e:
             logger.error("error=<%s> | planning pass failed", str(e))
             return '{"tool": null, "params": {}, "summary": ""}'
+# =============================================================================================================================
 
     async def process_message_streaming(self, message: str, session_id: str) -> AsyncGenerator[Dict[str, Any], None]:
         """Process user message with streaming response for API"""

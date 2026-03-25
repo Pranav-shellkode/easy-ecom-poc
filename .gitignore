@@ -5,3 +5,6 @@ __pycache__/
 agents/__pycache__/
 tests/
 CHANGES.txt
+easyecom_frontend-dev/easyecom_frontend-dev/node_modules/
+easyecom_frontend-dev/
+test_suite.md 
